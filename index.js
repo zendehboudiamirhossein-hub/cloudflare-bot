@@ -41,16 +41,21 @@ bot.start((ctx) => {
 bot.action('connect_cf', async (ctx) => {
 	await ctx.answerCbQuery();
 	sessions.set(ctx.chat.id, { step: 'awaiting_token' });
+	const tokenUrl =
+		'https://dash.cloudflare.com/profile/api-tokens?permissionGroupKeys=' +
+		'%5B%7B%22key%22%3A%22workers_scripts%22%2C%22type%22%3A%22edit%22%7D%2C' +
+		'%7B%22key%22%3A%22workers_kv_storage%22%2C%22type%22%3A%22edit%22%7D%2C' +
+		'%7B%22key%22%3A%22d1%22%2C%22type%22%3A%22edit%22%7D%2C' +
+		'%7B%22key%22%3A%22account_settings%22%2C%22type%22%3A%22read%22%7D%5D' +
+		'&accountId=%2A&zoneId=all&name=Zeus%20Panel%20Deploy%20Token';
 	await ctx.reply(
-		'روی دکمهٔ پایین بزن تا مستقیم صفحهٔ ساخت توکن Cloudflare باز بشه:\n\n' +
-		'۱. اونجا "Create Token" → تمپلیت آمادهٔ "Edit Cloudflare Workers" رو انتخاب کن (Use Template)\n' +
-		'   این تمپلیت اکثر دسترسی‌های لازم رو از قبل داره (Workers Scripts، KV، Account Settings، User Details)\n' +
-		'۲. فقط یک ردیف اضافه کن: Account → D1 → Edit\n' +
-		'۳. "Continue to summary" بعد "Create Token" بزن\n' +
-		'۴. توکن ساخته‌شده رو کپی کن و همینجا برام بفرست 👇\n\n' +
-		'⚠️ به‌دلیل امنیت خودِ Cloudflare، هیچ ربات یا سایتی (حتی این ربات) نمی‌تونه به‌جای تو روی "Create Token" کلیک کنه — این تاییدیهٔ آخر همیشه دست خودته.\n' +
+		'روی دکمهٔ پایین بزن — صفحهٔ Cloudflare با تمام دسترسی‌های لازم از قبل پر شده باز می‌شه (Workers Scripts، KV، D1، Account Settings):\n\n' +
+		'۱. پایین صفحه "Continue to summary" رو بزن\n' +
+		'۲. "Create Token" رو بزن\n' +
+		'۳. توکن رو کپی کن و همینجا برام بفرست 👇\n\n' +
+		'⚠️ به‌دلیل امنیت خودِ Cloudflare، کلیک نهایی "Create Token" همیشه دست خودته — هیچ ربات یا سایتی نمی‌تونه جاش این کار رو بکنه.\n' +
 		'توکن رو فقط برای همین دیپلوی استفاده می‌کنم و جایی ذخیرش نمی‌کنم.',
-		Markup.inlineKeyboard([Markup.button.url('🔗 باز کردن صفحهٔ ساخت توکن', 'https://dash.cloudflare.com/profile/api-tokens')])
+		Markup.inlineKeyboard([Markup.button.url('🔗 ساخت توکن با دسترسی‌های آماده', tokenUrl)])
 	);
 });
 
