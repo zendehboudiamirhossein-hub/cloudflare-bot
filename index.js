@@ -127,15 +127,22 @@ async function listAndShowAllWorkers(ctx, token, accountId) {
 
 	const MAX_SHOWN = 40;
 	const shown = workers.slice(0, MAX_SHOWN);
+	// Worker names can be up to 63 chars, which combined with a prefix can blow past
+	// Telegram's 64-byte callback_data limit — so download buttons reference this
+	// list by index instead of embedding the name directly.
+	getSession(chatId).lastWorkersList = shown.map((w) => w.name);
+
 	let msg = `🌐 Workerهای این اکانت (${workers.length} عدد):\n\n`;
 	const buttons = [];
-	for (const w of shown) {
+	shown.forEach((w, idx) => {
 		const mark = w.isZeus ? '🟣 پنل Zeus' : '⚪ Worker دیگه';
 		msg += `${mark} — ${w.name}\n`;
+		const row = [Markup.button.callback('⬇️ سورس', `dl_${idx}`)];
 		if (w.isZeus && !isTracked(w.name)) {
-			buttons.push([Markup.button.callback(`➕ اضافه‌کردن «${w.name}» به لیست من`, `import_${w.name}`)]);
+			row.push(Markup.button.callback('➕ اضافه به لیست من', `imp_${idx}`));
 		}
-	}
+		buttons.push(row);
+	});
 	if (workers.length > MAX_SHOWN) msg += `\n… و ${workers.length - MAX_SHOWN} مورد دیگر`;
 	msg += subdomain
 		? `\n\nآدرس پنل‌های 🟣 معمولاً: https://<اسم>.${subdomain}.workers.dev/panel`
@@ -144,13 +151,42 @@ async function listAndShowAllWorkers(ctx, token, accountId) {
 	await ctx.reply(msg, Markup.inlineKeyboard(buttons));
 }
 
-bot.action(/^import_(.+)$/, async (ctx) => {
+bot.action(/^dl_(\d+)$/, async (ctx) => {
 	await ctx.answerCbQuery();
 	const chatId = ctx.chat.id;
-	const workerName = ctx.match[1];
+	const idx = parseInt(ctx.match[1], 10);
 	const session = getSession(chatId);
-	if (!session.token || !session.accountId) {
-		await ctx.reply('توکن منقضی شده؛ دوباره از «🌐 همه Workerهای اکانت» شروع کن.');
+	if (!session.token || !session.accountId || !session.lastWorkersList) {
+		await ctx.reply('لیست منقضی شده؛ دوباره «🌐 همه Workerهای اکانت» رو بزن.');
+		return;
+	}
+	const workerName = session.lastWorkersList[idx];
+	if (!workerName) {
+		await ctx.reply('این آیتم پیدا نشد؛ دوباره «🌐 همه Workerهای اکانت» رو بزن.');
+		return;
+	}
+	await ctx.reply(`⏳ در حال گرفتن سورس «${workerName}» از Cloudflare...`);
+	try {
+		const content = await downloadWorkerSource(session.token, session.accountId, workerName);
+		await ctx.replyWithDocument({ source: Buffer.from(content, 'utf8'), filename: `${workerName}.js` });
+	} catch (err) {
+		console.error(err);
+		await ctx.reply('❌ دانلود ناموفق بود: ' + err.message);
+	}
+});
+
+bot.action(/^imp_(\d+)$/, async (ctx) => {
+	await ctx.answerCbQuery();
+	const chatId = ctx.chat.id;
+	const session = getSession(chatId);
+	const idx = parseInt(ctx.match[1], 10);
+	if (!session.token || !session.accountId || !session.lastWorkersList) {
+		await ctx.reply('لیست منقضی شده؛ دوباره از «🌐 همه Workerهای اکانت» شروع کن.');
+		return;
+	}
+	const workerName = session.lastWorkersList[idx];
+	if (!workerName) {
+		await ctx.reply('این آیتم پیدا نشد؛ دوباره «🌐 همه Workerهای اکانت» رو بزن.');
 		return;
 	}
 	if (store.getPanel(chatId, workerName)) {
@@ -212,6 +248,7 @@ bot.action(/^panel_(.+)$/, async (ctx) => {
 		Markup.inlineKeyboard([
 			[Markup.button.url('🔗 باز کردن پنل', panel.panelUrl)],
 			[Markup.button.callback('🔄 آپدیت به آخرین نسخه', `update_${workerName}`)],
+			[Markup.button.callback('⬇️ دانلود سورس فعلی', `source_${workerName}`)],
 			[Markup.button.callback('🔀 تغییر دامنه (اسم Worker)', `rename_${workerName}`)],
 			[Markup.button.callback('🗑 حذف پنل', `delconfirm_${workerName}`)],
 			[Markup.button.callback('◀️ بازگشت به لیست', 'my_panels')],
@@ -271,6 +308,44 @@ async function askNewName(ctx, session, workerName, accountId) {
 			'قوانین اسم: فقط حروف کوچک انگلیسی، عدد و خط تیره، بین ۴ تا ۵۸ کاراکتر، بدون خط تیره در ابتدا/انتها.\n\n' +
 			'⚠️ دیتابیس و کاربرای پنل دست‌نخورده می‌مونن؛ فقط آدرس عوض می‌شه و لینک قبلی از کار می‌افته.'
 	);
+}
+
+bot.action(/^source_(.+)$/, async (ctx) => {
+	await ctx.answerCbQuery();
+	const chatId = ctx.chat.id;
+	const workerName = ctx.match[1];
+	const panel = store.getPanel(chatId, workerName);
+	if (!panel) {
+		await ctx.reply('این پنل پیدا نشد.');
+		return;
+	}
+	const session = getSession(chatId);
+	if (session.token && session.accountId === panel.accountId) {
+		await runSource(ctx, session.token, panel);
+		return;
+	}
+	session.step = 'awaiting_token_manage';
+	session.pendingAction = { type: 'source', workerName, accountId: panel.accountId };
+	await ctx.reply(
+		'برای دانلود سورس فعلی به توکن Cloudflare نیاز دارم (فقط برای همین درخواست استفاده می‌شه). همون توکن قبلی یا یک توکن جدید با دسترسی Workers Scripts رو بفرست:',
+		Markup.inlineKeyboard([Markup.button.url('🔗 ساخت توکن', TOKEN_URL)])
+	);
+});
+
+async function runSource(ctx, token, panel) {
+	await ctx.reply('⏳ در حال گرفتن سورس فعلی از Cloudflare...');
+	try {
+		const content = await downloadWorkerSource(token, panel.accountId, panel.workerName);
+		await ctx.replyWithDocument({ source: Buffer.from(content, 'utf8'), filename: `${panel.workerName}.js` });
+		if (content.trim() === WORKER_SOURCE.trim()) {
+			await ctx.reply('ℹ️ این سورس دقیقاً همون فایل worker-src/panel.js توی پروژهٔ ربات‌ه (فرقی نکرده).');
+		} else {
+			await ctx.reply('ℹ️ توجه: این سورس با فایل worker-src/panel.js توی پروژهٔ ربات فرق داره (مثلاً به‌خاطر self-update داخلی پنل یا آپدیت دستی).');
+		}
+	} catch (err) {
+		console.error(err);
+		await ctx.reply('❌ دانلود ناموفق بود: ' + err.message);
+	}
 }
 
 bot.action(/^delconfirm_(.+)$/, async (ctx) => {
@@ -420,6 +495,8 @@ async function handleManageToken(ctx, session, text) {
 			await runDelete(ctx, text, panel);
 		} else if (pending.type === 'rename') {
 			await askNewName(ctx, session, pending.workerName, pending.accountId);
+		} else if (pending.type === 'source') {
+			await runSource(ctx, text, panel);
 		}
 	} catch (err) {
 		console.error(err);
@@ -554,6 +631,26 @@ async function getWorkerCreatedAt(token, accountId, scriptName) {
 	if (!data.success) return null;
 	const found = (data.result || []).find((s) => s.id === scriptName);
 	return found && found.created_on ? new Date(found.created_on).getTime() : null;
+}
+
+// Downloads the LIVE script currently running on Cloudflare for this worker —
+// this can differ from local worker-src/panel.js if the panel's own internal
+// self-update logic (or a manual edit in the CF dashboard) has replaced it.
+async function downloadWorkerSource(token, accountId, workerName) {
+	const res = await fetch(`${CF_API}/accounts/${accountId}/workers/scripts/${workerName}/content`, {
+		headers: cfHeaders(token, false),
+	});
+	if (!res.ok) {
+		let errText = '';
+		try {
+			const data = await res.json();
+			errText = JSON.stringify(data.errors || data);
+		} catch (e) {
+			errText = await res.text().catch(() => res.statusText);
+		}
+		throw new Error(errText);
+	}
+	return await res.text();
 }
 
 async function workerExists(token, accountId, scriptName) {
