@@ -636,8 +636,14 @@ async function getWorkerCreatedAt(token, accountId, scriptName) {
 // Downloads the LIVE script currently running on Cloudflare for this worker —
 // this can differ from local worker-src/panel.js if the panel's own internal
 // self-update logic (or a manual edit in the CF dashboard) has replaced it.
+//
+// NOTE: the correct endpoint is GET .../workers/scripts/{name} (no /content
+// suffix — that path returns error 10405 "Method not allowed for this
+// authentication scheme"). For ES-module workers like this one, Cloudflare
+// answers with a multipart/form-data body (one part per module) rather than
+// plain text, so that has to be parsed out.
 async function downloadWorkerSource(token, accountId, workerName) {
-	const res = await fetch(`${CF_API}/accounts/${accountId}/workers/scripts/${workerName}/content`, {
+	const res = await fetch(`${CF_API}/accounts/${accountId}/workers/scripts/${workerName}`, {
 		headers: cfHeaders(token, false),
 	});
 	if (!res.ok) {
@@ -650,7 +656,61 @@ async function downloadWorkerSource(token, accountId, workerName) {
 		}
 		throw new Error(errText);
 	}
+	const contentType = res.headers.get('content-type') || '';
+	if (contentType.toLowerCase().includes('multipart/form-data')) {
+		const buf = Buffer.from(await res.arrayBuffer());
+		return extractScriptFromMultipart(buf, contentType);
+	}
 	return await res.text();
+}
+
+// Minimal multipart/form-data parser: pulls out the part that looks like the
+// worker's JS module (by filename/content-type; falls back to the metadata
+// part's sibling — the only other part — if nothing matches explicitly).
+function extractScriptFromMultipart(buffer, contentType) {
+	const boundaryMatch = /boundary=(?:"([^"]+)"|([^;]+))/i.exec(contentType);
+	const boundary = boundaryMatch ? (boundaryMatch[1] || boundaryMatch[2]).trim() : null;
+	if (!boundary) throw new Error('boundary در پاسخ Cloudflare پیدا نشد');
+	const boundaryBuf = Buffer.from('--' + boundary);
+
+	const parts = [];
+	let pos = buffer.indexOf(boundaryBuf, 0);
+	while (pos !== -1) {
+		const next = buffer.indexOf(boundaryBuf, pos + boundaryBuf.length);
+		if (next === -1) break;
+		parts.push(buffer.slice(pos + boundaryBuf.length, next));
+		pos = next;
+	}
+
+	const CRLFCRLF = Buffer.from('\r\n\r\n');
+	function bodyOf(partBuf) {
+		const headerEnd = partBuf.indexOf(CRLFCRLF);
+		if (headerEnd === -1) return null;
+		const headerStr = partBuf.slice(0, headerEnd).toString('utf8');
+		let content = partBuf.slice(headerEnd + CRLFCRLF.length);
+		if (content.slice(-2).toString('utf8') === '\r\n') content = content.slice(0, -2);
+		return { headerStr, content };
+	}
+
+	for (const p of parts) {
+		const parsed = bodyOf(p);
+		if (!parsed) continue;
+		if (
+			/filename="[^"]*\.(js|mjs)"/i.test(parsed.headerStr) ||
+			/content-type:\s*application\/javascript/i.test(parsed.headerStr) ||
+			/name="panel\.js"/i.test(parsed.headerStr)
+		) {
+			return parsed.content.toString('utf8');
+		}
+	}
+	// Fallback: skip the JSON "metadata" part and return the first non-JSON part.
+	for (const p of parts) {
+		const parsed = bodyOf(p);
+		if (!parsed) continue;
+		if (/name="metadata"/i.test(parsed.headerStr)) continue;
+		return parsed.content.toString('utf8');
+	}
+	throw new Error('فایل سورس توی پاسخ Cloudflare پیدا نشد (فرمت غیرمنتظره)');
 }
 
 async function workerExists(token, accountId, scriptName) {
